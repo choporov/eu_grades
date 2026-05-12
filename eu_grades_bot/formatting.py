@@ -38,6 +38,55 @@ def format_entries(entries: list[GradeEntry] | tuple[GradeEntry, ...], empty_tex
     return "\n".join(parts).strip()
 
 
+def format_today_entries(
+    entries: list[GradeEntry] | tuple[GradeEntry, ...],
+    disciplines: tuple[str, ...],
+    day: date,
+) -> str:
+    grades = [entry for entry in entries if not is_absence(entry.value)]
+    absences = [entry for entry in entries if is_absence(entry.value)]
+    subject_list = format_subject_list(disciplines)
+
+    parts: list[str] = [format_date(day), ""]
+    if not grades and not absences:
+        parts.extend([subject_list, "Не має даних щодо пропусків та оцінок"])
+        return "\n".join(parts).strip()
+
+    if grades:
+        parts.append("Оцінки:")
+        parts.extend(format_today_entry_line(entry) for entry in sort_today_entries(grades))
+    else:
+        parts.extend([subject_list, "Оцінки відсутні"])
+
+    parts.append("")
+    if absences:
+        parts.append("Пропуски:")
+        parts.extend(format_today_absence_line(entry) for entry in sort_today_entries(absences))
+        parts.append(f"Загальна кількість пропусків: {len(absences)}")
+    else:
+        parts.extend([subject_list, "Пропуски відсутні"])
+
+    return "\n".join(parts).strip()
+
+
+def format_subject_list(disciplines: tuple[str, ...]) -> str:
+    if not disciplines:
+        return "Дисципліни не знайдено."
+    return "\n".join(html.escape(discipline) for discipline in disciplines)
+
+
+def sort_today_entries(entries: list[GradeEntry]) -> list[GradeEntry]:
+    return sorted(entries, key=lambda e: (e.discipline.casefold(), e.column_index, e.group.casefold()))
+
+
+def format_today_entry_line(entry: GradeEntry) -> str:
+    return f"{html.escape(entry.discipline)} - {html.escape(display_value(entry.value))}"
+
+
+def format_today_absence_line(entry: GradeEntry) -> str:
+    return html.escape(entry.discipline)
+
+
 def format_entry_line(entry: GradeEntry) -> str:
     marker = marker_for_value(entry.value)
     return f"{marker} {format_date(entry.date)} - {html.escape(display_value(entry.value))}"

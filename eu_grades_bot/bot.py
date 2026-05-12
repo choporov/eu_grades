@@ -17,7 +17,7 @@ from telegram.ext import (
 from .config import Settings, load_settings
 from .dates import current_week_bounds, date_range_filter, previous_week_bounds, today_in
 from .drive import DriveWorkbookProvider, LocalWorkbookProvider
-from .formatting import format_entries, format_subjects, split_telegram_message
+from .formatting import format_entries, format_subjects, format_today_entries, split_telegram_message
 from .grades import GradesRepository, is_valid_email, normalize_email
 from .storage import UserStorage
 
@@ -253,14 +253,11 @@ async def send_period_entries(
     services = get_services(context)
     today = today_in(services.settings.timezone)
     if period == "today":
-        await send_entries(
-            update,
-            context,
-            email,
-            empty_text="За сьогодні записів не знайдено.",
-            start=today,
-            end=today,
-        )
+        grades = services.repository.get_student_grades(email)
+        entries = list(date_range_filter(list(grades.entries), today, today))
+        text = format_today_entries(entries, grades.disciplines, today)
+        for chunk in split_telegram_message(text):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
     elif period == "week":
         start, end = current_week_bounds(today)
         await send_entries(
@@ -301,12 +298,7 @@ async def send_subject_entries(
 async def daily_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     services = get_services(context)
     today = today_in(services.settings.timezone)
-    await send_scheduled_summary(
-        context,
-        start=today,
-        end=today,
-        empty_text="За сьогодні записів не знайдено.",
-    )
+    await send_scheduled_daily_summary(context, today)
 
 
 async def weekly_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -343,6 +335,25 @@ async def send_scheduled_summary(
                 )
             except Exception:
                 logger.exception("Failed to send scheduled summary to chat_id=%s", user.chat_id)
+
+
+async def send_scheduled_daily_summary(context: ContextTypes.DEFAULT_TYPE, today) -> None:
+    services = get_services(context)
+    for user in services.storage.all_users():
+        grades = services.repository.get_student_grades(user.email)
+        entries = date_range_filter(list(grades.entries), today, today)
+        if not entries and not services.settings.send_empty_summaries:
+            continue
+        text = format_today_entries(entries, grades.disciplines, today)
+        for chunk in split_telegram_message(text):
+            try:
+                await context.bot.send_message(
+                    chat_id=user.chat_id,
+                    text=chunk,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                logger.exception("Failed to send scheduled daily summary to chat_id=%s", user.chat_id)
 
 
 async def require_authorized_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
