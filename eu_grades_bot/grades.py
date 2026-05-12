@@ -1,0 +1,241 @@
+from __future__ import annotations
+
+import re
+import time
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import date, datetime
+from pathlib import Path
+from typing import Iterable, Protocol
+
+from openpyxl import load_workbook
+from openpyxl.worksheet.worksheet import Worksheet
+
+from .drive import WorkbookSource
+
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+@dataclass(frozen=True)
+class GradeEntry:
+    discipline: str
+    group: str
+    student_name: str
+    email: str
+    date: date
+    value: str
+    source_file: str
+    column_index: int
+
+
+@dataclass(frozen=True)
+class StudentGrades:
+    email: str
+    student_name: str | None
+    disciplines: tuple[str, ...]
+    entries: tuple[GradeEntry, ...]
+
+
+class WorkbookProvider(Protocol):
+    def list_workbooks(self) -> list[WorkbookSource]:
+        ...
+
+
+class GradesRepository:
+    def __init__(self, provider: WorkbookProvider, cache_ttl_seconds: int = 300):
+        self.provider = provider
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self._loaded_at = 0.0
+        self._entries_by_email: dict[str, list[GradeEntry]] = {}
+        self._names_by_email: dict[str, str] = {}
+
+    def get_student_grades(self, email: str, force_reload: bool = False) -> StudentGrades:
+        normalized_email = normalize_email(email)
+        self._ensure_loaded(force_reload=force_reload)
+        entries = tuple(sorted(self._entries_by_email.get(normalized_email, []), key=_entry_sort_key))
+        disciplines = tuple(dict.fromkeys(entry.discipline for entry in entries))
+        return StudentGrades(
+            email=normalized_email,
+            student_name=self._names_by_email.get(normalized_email),
+            disciplines=disciplines,
+            entries=entries,
+        )
+
+    def _ensure_loaded(self, force_reload: bool = False) -> None:
+        if (
+            not force_reload
+            and self._loaded_at > 0
+            and time.monotonic() - self._loaded_at < self.cache_ttl_seconds
+        ):
+            return
+        self.reload()
+
+    def reload(self) -> None:
+        entries_by_email: dict[str, list[GradeEntry]] = defaultdict(list)
+        names_by_email: dict[str, str] = {}
+
+        for source in self.provider.list_workbooks():
+            discipline = discipline_from_title(source.title)
+            for entry in iter_workbook_entries(source.path, discipline, source.title):
+                entries_by_email[entry.email].append(entry)
+                names_by_email.setdefault(entry.email, entry.student_name)
+
+        self._entries_by_email = dict(entries_by_email)
+        self._names_by_email = names_by_email
+        self._loaded_at = time.monotonic()
+
+
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def is_valid_email(email: str) -> bool:
+    return bool(EMAIL_RE.match(normalize_email(email)))
+
+
+def discipline_from_title(title: str) -> str:
+    stem = Path(title).stem
+    if " - " in stem:
+        return stem.rsplit(" - ", 1)[0].strip()
+    return stem.strip()
+
+
+def iter_workbook_entries(path: Path, discipline: str, source_title: str | None = None) -> Iterable[GradeEntry]:
+    workbook = load_workbook(path, data_only=True, read_only=False)
+    try:
+        for sheet in workbook.worksheets:
+            yield from iter_sheet_entries(sheet, discipline, source_title or path.name)
+    finally:
+        workbook.close()
+
+
+def iter_sheet_entries(sheet: Worksheet, discipline: str, source_file: str) -> Iterable[GradeEntry]:
+    header_row = _find_header_row(sheet)
+    if header_row is None:
+        return
+
+    email_col = _find_email_column(sheet, header_row)
+    if email_col is None:
+        return
+
+    name_col = _find_name_column(sheet, header_row)
+    date_columns = _find_date_columns(sheet, header_row)
+    if not date_columns:
+        return
+
+    for row_index in range(header_row + 1, sheet.max_row + 1):
+        raw_email = sheet.cell(row=row_index, column=email_col).value
+        if raw_email is None:
+            continue
+        email = normalize_email(str(raw_email))
+        if not is_valid_email(email):
+            continue
+
+        raw_name = sheet.cell(row=row_index, column=name_col).value if name_col else None
+        student_name = str(raw_name).strip() if raw_name else ""
+
+        for column_index, entry_date in date_columns:
+            raw_value = sheet.cell(row=row_index, column=column_index).value
+            value = normalize_grade_value(raw_value)
+            if value is None:
+                continue
+            yield GradeEntry(
+                discipline=discipline,
+                group=sheet.title,
+                student_name=student_name,
+                email=email,
+                date=entry_date,
+                value=value,
+                source_file=source_file,
+                column_index=column_index,
+            )
+
+
+def normalize_grade_value(raw_value) -> str | None:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, str):
+        value = raw_value.strip()
+        if not value:
+            return None
+        if value.lower() == "в":
+            return "в"
+        return value
+    if isinstance(raw_value, float) and raw_value.is_integer():
+        return str(int(raw_value))
+    if isinstance(raw_value, int):
+        return str(raw_value)
+    return str(raw_value).strip() or None
+
+
+def is_absence(value: str) -> bool:
+    return value.strip().lower() == "в"
+
+
+def numeric_grade(value: str) -> int | None:
+    try:
+        number = float(value.replace(",", "."))
+    except ValueError:
+        return None
+    if not number.is_integer():
+        return None
+    return int(number)
+
+
+def _find_header_row(sheet: Worksheet) -> int | None:
+    for row_index in range(1, min(sheet.max_row, 10) + 1):
+        if _find_email_column(sheet, row_index) is not None:
+            return row_index
+    return None
+
+
+def _find_email_column(sheet: Worksheet, row_index: int) -> int | None:
+    for column_index in range(1, sheet.max_column + 1):
+        value = sheet.cell(row=row_index, column=column_index).value
+        text = str(value).strip().lower() if value is not None else ""
+        if "електрон" in text or "email" in text or "e-mail" in text:
+            return column_index
+    return None
+
+
+def _find_name_column(sheet: Worksheet, row_index: int) -> int | None:
+    for column_index in range(1, sheet.max_column + 1):
+        value = sheet.cell(row=row_index, column=column_index).value
+        text = str(value).strip().lower() if value is not None else ""
+        if "прізвище" in text or "піб" in text or "студент" in text:
+            return column_index
+    return None
+
+
+def _find_date_columns(sheet: Worksheet, row_index: int) -> list[tuple[int, date]]:
+    result: list[tuple[int, date]] = []
+    for column_index in range(1, sheet.max_column + 1):
+        value = sheet.cell(row=row_index, column=column_index).value
+        parsed = parse_date_cell(value)
+        if parsed is not None:
+            result.append((column_index, parsed))
+    return result
+
+
+def parse_date_cell(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _entry_sort_key(entry: GradeEntry):
+    return (entry.discipline.casefold(), entry.date, entry.column_index, entry.group.casefold())
