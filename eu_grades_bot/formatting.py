@@ -40,7 +40,13 @@ def format_entries(entries: list[GradeEntry] | tuple[GradeEntry, ...], empty_tex
 
 def format_entry_line(entry: GradeEntry) -> str:
     marker = marker_for_value(entry.value)
-    return f"{marker} {format_date(entry.date)} - {html.escape(entry.value)}"
+    return f"{marker} {format_date(entry.date)} - {html.escape(display_value(entry.value))}"
+
+
+def display_value(value: str) -> str:
+    if is_absence(value):
+        return "відсутній"
+    return value
 
 
 def marker_for_value(value: str) -> str:
@@ -79,4 +85,3 @@ def split_telegram_message(text: str) -> list[str]:
     if current:
         chunks.append("\n\n".join(current))
     return chunks
-

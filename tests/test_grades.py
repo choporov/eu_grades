@@ -45,7 +45,7 @@ class GradesRepositoryTest(unittest.TestCase):
                 student_name="Student",
                 email="student@example.com",
                 date=date(2026, 5, 14),
-                value="2",
+                value="в",
                 source_file="example.xlsx",
                 column_index=5,
             ),
@@ -54,7 +54,8 @@ class GradesRepositoryTest(unittest.TestCase):
 
         self.assertIn("<b>Бази даних</b>", message)
         self.assertIn("🟢 12.05.2026 - 11", message)
-        self.assertIn("🔴 14.05.2026 - 2", message)
+        self.assertIn("🔴 14.05.2026 - відсутній", message)
+        self.assertNotIn(" - в\n", f"{message}\n")
 
 
 if __name__ == "__main__":
