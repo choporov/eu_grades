@@ -17,7 +17,13 @@ from telegram.ext import (
 from .config import Settings, load_settings
 from .dates import current_week_bounds, date_range_filter, previous_week_bounds, today_in
 from .drive import DriveWorkbookProvider, LocalWorkbookProvider
-from .formatting import format_entries, format_subjects, format_today_entries, split_telegram_message
+from .formatting import (
+    format_entries,
+    format_period_entries_by_date,
+    format_subjects,
+    format_today_entries,
+    split_telegram_message,
+)
 from .grades import GradesRepository, is_valid_email, normalize_email
 from .storage import UserStorage
 
@@ -260,24 +266,40 @@ async def send_period_entries(
             await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
     elif period == "week":
         start, end = current_week_bounds(today)
-        await send_entries(
+        await send_date_grouped_period_entries(
             update,
             context,
             email,
+            start,
+            end,
             empty_text="За поточний тиждень записів не знайдено.",
-            start=start,
-            end=end,
         )
     elif period == "lastweek":
         start, end = previous_week_bounds(today)
-        await send_entries(
+        await send_date_grouped_period_entries(
             update,
             context,
             email,
+            start,
+            end,
             empty_text="За попередній тиждень записів не знайдено.",
-            start=start,
-            end=end,
         )
+
+
+async def send_date_grouped_period_entries(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    email: str,
+    start,
+    end,
+    empty_text: str,
+) -> None:
+    services = get_services(context)
+    grades = services.repository.get_student_grades(email)
+    entries = list(date_range_filter(list(grades.entries), start, end))
+    text = format_period_entries_by_date(entries, empty_text=empty_text)
+    for chunk in split_telegram_message(text):
+        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
 
 
 async def send_subject_entries(
@@ -325,7 +347,7 @@ async def send_scheduled_summary(
         entries = date_range_filter(list(grades.entries), start, end)
         if not entries and not services.settings.send_empty_summaries:
             continue
-        text = format_entries(entries, empty_text=empty_text)
+        text = format_period_entries_by_date(entries, empty_text=empty_text)
         for chunk in split_telegram_message(text):
             try:
                 await context.bot.send_message(

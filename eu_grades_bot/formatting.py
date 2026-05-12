@@ -38,6 +38,65 @@ def format_entries(entries: list[GradeEntry] | tuple[GradeEntry, ...], empty_tex
     return "\n".join(parts).strip()
 
 
+def format_period_entries_by_date(
+    entries: list[GradeEntry] | tuple[GradeEntry, ...],
+    empty_text: str,
+) -> str:
+    if not entries:
+        return empty_text
+
+    grouped: dict[date, list[GradeEntry]] = defaultdict(list)
+    for entry in entries:
+        grouped[entry.date].append(entry)
+
+    parts: list[str] = []
+    for day in sorted(grouped):
+        parts.append(format_date(day))
+        for entry in sorted(grouped[day], key=lambda e: (e.discipline.casefold(), e.column_index, e.group.casefold())):
+            parts.append(format_period_entry_line(entry))
+        parts.append("")
+
+    parts.append(format_period_summary(entries))
+    return "\n".join(parts).strip()
+
+
+def format_period_entry_line(entry: GradeEntry) -> str:
+    marker = marker_for_value(entry.value)
+    return f"{marker} {html.escape(entry.discipline)} - {html.escape(display_value(entry.value))}"
+
+
+def format_period_summary(entries: list[GradeEntry] | tuple[GradeEntry, ...]) -> str:
+    total_lessons = len(entries)
+    absence_count = sum(1 for entry in entries if is_absence(entry.value))
+    days_count = len({entry.date for entry in entries})
+    absence_percent = round(absence_count / total_lessons * 100) if total_lessons else 0
+    grades = [grade for entry in entries if (grade := numeric_grade(entry.value)) is not None]
+    excellent_count = sum(1 for grade in grades if grade > 9)
+    good_count = sum(1 for grade in grades if 7 <= grade <= 9)
+    satisfactory_count = sum(1 for grade in grades if 5 <= grade <= 7)
+    unsatisfactory_count = sum(1 for grade in grades if grade < 5)
+
+    return "\n".join(
+        [
+            f"Загальна кількість пропусків: {absence_count} з {total_lessons}. "
+            f"Пропущено {absence_percent}% занять за {days_count} {day_word(days_count)}.",
+            f"Загальна кількість оцінок: {len(grades)}.",
+            f'Оцінки "відмінно": {excellent_count}.',
+            f'Оцінки "добре": {good_count}.',
+            f'Оцінки "задовільно": {satisfactory_count}.',
+            f'Оцінки "незадовільно": {unsatisfactory_count}.',
+        ]
+    )
+
+
+def day_word(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return "день"
+    if count % 10 in {2, 3, 4} and count % 100 not in {12, 13, 14}:
+        return "дні"
+    return "днів"
+
+
 def format_today_entries(
     entries: list[GradeEntry] | tuple[GradeEntry, ...],
     disciplines: tuple[str, ...],
