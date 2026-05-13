@@ -42,6 +42,13 @@ class UserStorage:
         self._save(payload)
         return self.get(chat_id)  # type: ignore[return-value]
 
+    def delete(self, chat_id: int) -> bool:
+        payload = self._load()
+        existed = str(chat_id) in payload
+        payload.pop(str(chat_id), None)
+        self._save(payload)
+        return existed
+
     def all_users(self) -> list[AuthorizedUser]:
         payload = self._load()
         users: list[AuthorizedUser] = []
@@ -72,4 +79,3 @@ class UserStorage:
         with temporary.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
         temporary.replace(self.path)
-

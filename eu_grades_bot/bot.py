@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 HELP_TEXT = """Команди:
 /start - авторизація email
+/stop - припинити діалог і видалити email
 /email student@example.com - змінити email
 /subjects - перелік дисциплін
 /grades - усі оцінки та пропуски
@@ -106,6 +107,7 @@ def build_application(settings: Settings, services: BotServices) -> Application:
     application.bot_data["services"] = services
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("email", email_command))
     application.add_handler(CommandHandler("subjects", subjects_command))
@@ -151,6 +153,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     grades = services.repository.get_student_grades(user.email)
     message = f"Ви авторизовані як {user.email}.\n\n{format_subjects(grades.disciplines)}"
     await update.message.reply_text(message, reply_markup=report_menu_keyboard())
+
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    services = get_services(context)
+    chat_id = require_chat_id(update)
+    services.storage.delete(chat_id)
+    await update.message.reply_text(
+        "Діалог припинено. Ваш email видалено з бота. Щоб знову користуватися ботом, надішліть /start."
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
