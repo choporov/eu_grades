@@ -41,6 +41,7 @@ def format_entries(entries: list[GradeEntry] | tuple[GradeEntry, ...], empty_tex
 def format_period_entries_by_date(
     entries: list[GradeEntry] | tuple[GradeEntry, ...],
     empty_text: str,
+    include_discipline_averages: bool = False,
 ) -> str:
     if not entries:
         return empty_text
@@ -57,6 +58,8 @@ def format_period_entries_by_date(
         parts.append("")
 
     parts.append(format_period_summary(entries))
+    if include_discipline_averages:
+        parts.extend(["", format_discipline_averages(entries)])
     return "\n".join(parts).strip()
 
 
@@ -87,6 +90,25 @@ def format_period_summary(entries: list[GradeEntry] | tuple[GradeEntry, ...]) ->
             f'Оцінки "незадовільно": {unsatisfactory_count}.',
         ]
     )
+
+
+def format_discipline_averages(entries: list[GradeEntry] | tuple[GradeEntry, ...]) -> str:
+    disciplines = sorted({entry.discipline for entry in entries}, key=str.casefold)
+    grades_by_discipline: dict[str, list[int]] = defaultdict(list)
+    for entry in entries:
+        grade = numeric_grade(entry.value)
+        if grade is not None:
+            grades_by_discipline[entry.discipline].append(grade)
+
+    lines = ["Середній бал за дисциплінами:"]
+    for discipline in disciplines:
+        grades = grades_by_discipline.get(discipline, [])
+        if grades:
+            average = sum(grades) / len(grades)
+            lines.append(f"{html.escape(discipline)} - {average:.1f}")
+        else:
+            lines.append(f"{html.escape(discipline)} - немає оцінок")
+    return "\n".join(lines)
 
 
 def day_word(count: int) -> str:

@@ -3,11 +3,12 @@ from __future__ import annotations
 import logging
 from datetime import time
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -50,6 +51,10 @@ HELP_TEXT = """Команди:
 /subject назва дисципліни - з конкретної дисципліни"""
 
 
+REPORT_MENU_TEXT = "Оберіть звіт:"
+REPORT_CALLBACK_PREFIX = "report:"
+
+
 class BotServices:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -71,6 +76,18 @@ def create_provider(settings: Settings):
         folder_id=settings.drive_folder_id,
         credentials_file=settings.google_credentials_file,
         cache_dir=settings.data_dir / "drive_cache",
+    )
+
+
+def report_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("/grades", callback_data=f"{REPORT_CALLBACK_PREFIX}grades")],
+            [
+                InlineKeyboardButton("/today", callback_data=f"{REPORT_CALLBACK_PREFIX}today"),
+                InlineKeyboardButton("/week", callback_data=f"{REPORT_CALLBACK_PREFIX}week"),
+            ],
+        ]
     )
 
 
@@ -97,6 +114,7 @@ def build_application(settings: Settings, services: BotServices) -> Application:
     application.add_handler(CommandHandler("week", week_command))
     application.add_handler(CommandHandler("lastweek", lastweek_command))
     application.add_handler(CommandHandler("subject", subject_command))
+    application.add_handler(CallbackQueryHandler(report_menu_callback, pattern=f"^{REPORT_CALLBACK_PREFIX}"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, email_message))
 
     schedule_jobs(application, settings)
@@ -132,11 +150,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     grades = services.repository.get_student_grades(user.email)
     message = f"Ви авторизовані як {user.email}.\n\n{format_subjects(grades.disciplines)}"
-    await update.message.reply_text(message)
+    await update.message.reply_text(message, reply_markup=report_menu_keyboard())
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(HELP_TEXT)
+    await update.message.reply_text(f"{HELP_TEXT}\n\n{REPORT_MENU_TEXT}", reply_markup=report_menu_keyboard())
 
 
 async def email_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -164,7 +182,7 @@ async def authorize_email(update: Update, context: ContextTypes.DEFAULT_TYPE, em
     normalized_email = normalize_email(email)
     services.storage.set_email(chat_id, normalized_email)
     grades = services.repository.get_student_grades(normalized_email)
-    await update.message.reply_text(format_subjects(grades.disciplines))
+    await update.message.reply_text(format_subjects(grades.disciplines), reply_markup=report_menu_keyboard())
 
 
 async def subjects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -176,6 +194,31 @@ async def subjects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(format_subjects(grades.disciplines))
 
 
+async def report_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+
+    services = get_services(context)
+    chat_id = query.message.chat_id if query.message else require_chat_id(update)
+    user = services.storage.get(chat_id)
+    if user is None:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Спочатку авторизуйтесь: надішліть свою email-адресу.",
+        )
+        return
+
+    action = query.data.removeprefix(REPORT_CALLBACK_PREFIX) if query.data else ""
+    if action == "grades":
+        await send_all_grades_report_to_chat(context, chat_id, user.email)
+    elif action == "today":
+        await send_period_entries_to_chat(context, chat_id, user.email, "today")
+    elif action == "week":
+        await send_period_entries_to_chat(context, chat_id, user.email, "week")
+
+
 async def grades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = await require_authorized_user(update, context)
     if user is None:
@@ -183,7 +226,7 @@ async def grades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     args = " ".join(context.args).strip()
     if not args:
-        await send_entries(update, context, user.email, empty_text="Оцінок і пропусків не знайдено.")
+        await send_all_grades_report(update, context, user.email)
         return
 
     key = args.casefold()
@@ -250,9 +293,42 @@ async def send_entries(
         await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
 
 
+async def send_all_grades_report(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    email: str,
+) -> None:
+    await send_all_grades_report_to_chat(context, require_chat_id(update), email)
+
+
+async def send_all_grades_report_to_chat(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    email: str,
+) -> None:
+    services = get_services(context)
+    grades = services.repository.get_student_grades(email)
+    text = format_period_entries_by_date(
+        list(grades.entries),
+        empty_text="Оцінок і пропусків не знайдено.",
+        include_discipline_averages=True,
+    )
+    for chunk in split_telegram_message(text):
+        await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML)
+
+
 async def send_period_entries(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
+    email: str,
+    period: str,
+) -> None:
+    await send_period_entries_to_chat(context, require_chat_id(update), email, period)
+
+
+async def send_period_entries_to_chat(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
     email: str,
     period: str,
 ) -> None:
@@ -263,12 +339,12 @@ async def send_period_entries(
         entries = list(date_range_filter(list(grades.entries), today, today))
         text = format_today_entries(entries, grades.disciplines, today)
         for chunk in split_telegram_message(text):
-            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+            await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML)
     elif period == "week":
         start, end = current_week_bounds(today)
-        await send_date_grouped_period_entries(
-            update,
+        await send_date_grouped_period_entries_to_chat(
             context,
+            chat_id,
             email,
             start,
             end,
@@ -276,9 +352,9 @@ async def send_period_entries(
         )
     elif period == "lastweek":
         start, end = previous_week_bounds(today)
-        await send_date_grouped_period_entries(
-            update,
+        await send_date_grouped_period_entries_to_chat(
             context,
+            chat_id,
             email,
             start,
             end,
@@ -294,12 +370,30 @@ async def send_date_grouped_period_entries(
     end,
     empty_text: str,
 ) -> None:
+    await send_date_grouped_period_entries_to_chat(
+        context,
+        require_chat_id(update),
+        email,
+        start,
+        end,
+        empty_text,
+    )
+
+
+async def send_date_grouped_period_entries_to_chat(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    email: str,
+    start,
+    end,
+    empty_text: str,
+) -> None:
     services = get_services(context)
     grades = services.repository.get_student_grades(email)
     entries = list(date_range_filter(list(grades.entries), start, end))
     text = format_period_entries_by_date(entries, empty_text=empty_text)
     for chunk in split_telegram_message(text):
-        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML)
 
 
 async def send_subject_entries(

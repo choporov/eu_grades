@@ -155,6 +155,27 @@ class GradesRepositoryTest(unittest.TestCase):
         self.assertIn('Оцінки "задовільно": 1.', message)
         self.assertIn('Оцінки "незадовільно": 2.', message)
 
+    def test_period_formatter_can_add_discipline_averages(self):
+        entries = [
+            GradeEntry("Бази даних", "222", "Student", "student@example.com", date(2026, 5, 11), "в", "example.xlsx", 4),
+            GradeEntry("Бази даних", "222", "Student", "student@example.com", date(2026, 5, 12), "3", "example.xlsx", 5),
+            GradeEntry("Бази даних", "222", "Student", "student@example.com", date(2026, 5, 13), "8", "example.xlsx", 6),
+            GradeEntry("Безпека інформаційних систем", "222", "Student", "student@example.com", date(2026, 5, 12), "10", "example.xlsx", 5),
+            GradeEntry("Безпека інформаційних систем", "222", "Student", "student@example.com", date(2026, 5, 13), "9", "example.xlsx", 6),
+            GradeEntry("Історія", "222", "Student", "student@example.com", date(2026, 5, 13), "в", "example.xlsx", 6),
+        ]
+
+        message = format_period_entries_by_date(
+            entries,
+            empty_text="empty",
+            include_discipline_averages=True,
+        )
+
+        self.assertIn("Середній бал за дисциплінами:", message)
+        self.assertIn("Бази даних - 5.5", message)
+        self.assertIn("Безпека інформаційних систем - 9.5", message)
+        self.assertIn("Історія - немає оцінок", message)
+
 
 if __name__ == "__main__":
     unittest.main()
