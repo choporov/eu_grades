@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -15,6 +16,7 @@ from .drive import WorkbookSource
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -75,15 +77,27 @@ class GradesRepository:
         entries_by_email: dict[str, list[GradeEntry]] = defaultdict(list)
         names_by_email: dict[str, str] = {}
 
-        for source in self.provider.list_workbooks():
+        sources = self.provider.list_workbooks()
+        logger.info("Loading grades from %d workbook(s).", len(sources))
+        total_entries = 0
+        for source in sources:
             discipline = discipline_from_title(source.title)
+            source_entries = 0
             for entry in iter_workbook_entries(source.path, discipline, source.title):
                 entries_by_email[entry.email].append(entry)
                 names_by_email.setdefault(entry.email, entry.student_name)
+                source_entries += 1
+            total_entries += source_entries
+            logger.info("Workbook %s produced %d grade/absence record(s).", source.title, source_entries)
 
         self._entries_by_email = dict(entries_by_email)
         self._names_by_email = names_by_email
         self._loaded_at = time.monotonic()
+        logger.info(
+            "Loaded %d grade/absence record(s) for %d email(s).",
+            total_entries,
+            len(self._entries_by_email),
+        )
 
 
 def normalize_email(email: str) -> str:

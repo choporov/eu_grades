@@ -40,6 +40,7 @@ HELP_TEXT = """Команди:
 /start - авторизація email
 /stop - припинити діалог і видалити email
 /email student@example.com - змінити email
+/refresh - перечитати таблиці з Drive/папки
 /subjects - перелік дисциплін
 /grades - усі оцінки та пропуски
 /grades today - за сьогодні
@@ -68,7 +69,11 @@ class BotServices:
 
 def create_provider(settings: Settings):
     if settings.grades_source == "local":
-        return LocalWorkbookProvider(settings.local_grades_dir)
+        return LocalWorkbookProvider(
+            settings.local_grades_dir,
+            credentials_file=settings.google_credentials_file,
+            cache_dir=settings.data_dir / "local_gsheet_cache",
+        )
     if not settings.drive_folder_id:
         raise ValueError("GRADES_DRIVE_FOLDER_ID is required for GRADES_SOURCE=drive.")
     if not settings.google_credentials_file:
@@ -110,6 +115,7 @@ def build_application(settings: Settings, services: BotServices) -> Application:
     application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("email", email_command))
+    application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("subjects", subjects_command))
     application.add_handler(CommandHandler("grades", grades_command))
     application.add_handler(CommandHandler("today", today_command))
@@ -150,7 +156,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Введіть адресу електронної пошти для авторизації.")
         return
 
-    grades = services.repository.get_student_grades(user.email)
+    grades = get_student_grades_for_request(services, user.email)
     message = f"Ви авторизовані як {user.email}.\n\n{format_subjects(grades.disciplines)}"
     await update.message.reply_text(message, reply_markup=report_menu_keyboard())
 
@@ -192,7 +198,7 @@ async def authorize_email(update: Update, context: ContextTypes.DEFAULT_TYPE, em
     chat_id = require_chat_id(update)
     normalized_email = normalize_email(email)
     services.storage.set_email(chat_id, normalized_email)
-    grades = services.repository.get_student_grades(normalized_email)
+    grades = get_student_grades_for_request(services, normalized_email)
     await update.message.reply_text(format_subjects(grades.disciplines), reply_markup=report_menu_keyboard())
 
 
@@ -201,8 +207,17 @@ async def subjects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if user is None:
         return
     services = get_services(context)
-    grades = services.repository.get_student_grades(user.email)
+    grades = get_student_grades_for_request(services, user.email)
     await update.message.reply_text(format_subjects(grades.disciplines))
+
+
+async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = await require_authorized_user(update, context)
+    if user is None:
+        return
+    services = get_services(context)
+    grades = services.repository.get_student_grades(user.email, force_reload=True)
+    await update.message.reply_text(format_subjects(grades.disciplines), reply_markup=report_menu_keyboard())
 
 
 async def report_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -290,7 +305,7 @@ async def send_entries(
     subject_query: str | None = None,
 ) -> None:
     services = get_services(context)
-    grades = services.repository.get_student_grades(email)
+    grades = get_student_grades_for_request(services, email)
     entries = list(date_range_filter(list(grades.entries), start, end))
 
     if subject_query:
@@ -318,7 +333,7 @@ async def send_all_grades_report_to_chat(
     email: str,
 ) -> None:
     services = get_services(context)
-    grades = services.repository.get_student_grades(email)
+    grades = get_student_grades_for_request(services, email)
     text = format_period_entries_by_date(
         list(grades.entries),
         empty_text="Оцінок і пропусків не знайдено.",
@@ -346,7 +361,7 @@ async def send_period_entries_to_chat(
     services = get_services(context)
     today = today_in(services.settings.timezone)
     if period == "today":
-        grades = services.repository.get_student_grades(email)
+        grades = get_student_grades_for_request(services, email)
         entries = list(date_range_filter(list(grades.entries), today, today))
         text = format_today_entries(entries, grades.disciplines, today)
         for chunk in split_telegram_message(text):
@@ -400,7 +415,7 @@ async def send_date_grouped_period_entries_to_chat(
     empty_text: str,
 ) -> None:
     services = get_services(context)
-    grades = services.repository.get_student_grades(email)
+    grades = get_student_grades_for_request(services, email)
     entries = list(date_range_filter(list(grades.entries), start, end))
     text = format_period_entries_by_date(entries, empty_text=empty_text)
     for chunk in split_telegram_message(text):
@@ -447,6 +462,7 @@ async def send_scheduled_summary(
     empty_text: str,
 ) -> None:
     services = get_services(context)
+    reload_repository_for_scheduled_run(services)
     for user in services.storage.all_users():
         grades = services.repository.get_student_grades(user.email)
         entries = date_range_filter(list(grades.entries), start, end)
@@ -466,6 +482,7 @@ async def send_scheduled_summary(
 
 async def send_scheduled_daily_summary(context: ContextTypes.DEFAULT_TYPE, today) -> None:
     services = get_services(context)
+    reload_repository_for_scheduled_run(services)
     for user in services.storage.all_users():
         grades = services.repository.get_student_grades(user.email)
         entries = date_range_filter(list(grades.entries), today, today)
@@ -500,3 +517,15 @@ def require_chat_id(update: Update) -> int:
 
 def get_services(context: ContextTypes.DEFAULT_TYPE) -> BotServices:
     return context.application.bot_data["services"]
+
+
+def get_student_grades_for_request(services: BotServices, email: str):
+    return services.repository.get_student_grades(
+        email,
+        force_reload=services.settings.grades_source == "drive",
+    )
+
+
+def reload_repository_for_scheduled_run(services: BotServices) -> None:
+    if services.settings.grades_source == "drive":
+        services.repository.reload()
