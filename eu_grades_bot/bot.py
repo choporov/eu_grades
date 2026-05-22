@@ -156,7 +156,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Введіть адресу електронної пошти для авторизації.")
         return
 
-    grades = get_student_grades_for_request(services, user.email)
+    grades = get_student_grades_cached(services, user.email)
     message = f"Ви авторизовані як {user.email}.\n\n{format_subjects(grades.disciplines)}"
     await update.message.reply_text(message, reply_markup=report_menu_keyboard())
 
@@ -198,7 +198,7 @@ async def authorize_email(update: Update, context: ContextTypes.DEFAULT_TYPE, em
     chat_id = require_chat_id(update)
     normalized_email = normalize_email(email)
     services.storage.set_email(chat_id, normalized_email)
-    grades = get_student_grades_for_request(services, normalized_email)
+    grades = get_student_grades_cached(services, normalized_email)
     await update.message.reply_text(format_subjects(grades.disciplines), reply_markup=report_menu_keyboard())
 
 
@@ -207,7 +207,7 @@ async def subjects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if user is None:
         return
     services = get_services(context)
-    grades = get_student_grades_for_request(services, user.email)
+    grades = get_student_grades_with_drive_refresh(services, user.email)
     await update.message.reply_text(format_subjects(grades.disciplines))
 
 
@@ -305,7 +305,7 @@ async def send_entries(
     subject_query: str | None = None,
 ) -> None:
     services = get_services(context)
-    grades = get_student_grades_for_request(services, email)
+    grades = get_student_grades_cached(services, email)
     entries = list(date_range_filter(list(grades.entries), start, end))
 
     if subject_query:
@@ -333,7 +333,7 @@ async def send_all_grades_report_to_chat(
     email: str,
 ) -> None:
     services = get_services(context)
-    grades = get_student_grades_for_request(services, email)
+    grades = get_student_grades_cached(services, email)
     text = format_period_entries_by_date(
         list(grades.entries),
         empty_text="Оцінок і пропусків не знайдено.",
@@ -361,7 +361,7 @@ async def send_period_entries_to_chat(
     services = get_services(context)
     today = today_in(services.settings.timezone)
     if period == "today":
-        grades = get_student_grades_for_request(services, email)
+        grades = get_student_grades_cached(services, email)
         entries = list(date_range_filter(list(grades.entries), today, today))
         text = format_today_entries(entries, grades.disciplines, today)
         for chunk in split_telegram_message(text):
@@ -415,7 +415,7 @@ async def send_date_grouped_period_entries_to_chat(
     empty_text: str,
 ) -> None:
     services = get_services(context)
-    grades = get_student_grades_for_request(services, email)
+    grades = get_student_grades_cached(services, email)
     entries = list(date_range_filter(list(grades.entries), start, end))
     text = format_period_entries_by_date(entries, empty_text=empty_text)
     for chunk in split_telegram_message(text):
@@ -519,7 +519,11 @@ def get_services(context: ContextTypes.DEFAULT_TYPE) -> BotServices:
     return context.application.bot_data["services"]
 
 
-def get_student_grades_for_request(services: BotServices, email: str):
+def get_student_grades_cached(services: BotServices, email: str):
+    return services.repository.get_student_grades(email)
+
+
+def get_student_grades_with_drive_refresh(services: BotServices, email: str):
     return services.repository.get_student_grades(
         email,
         force_reload=services.settings.grades_source == "drive",
