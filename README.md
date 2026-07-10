@@ -1,13 +1,13 @@
-# Telegram bot for student grades
+# Телеграм-бот для інформування студентів про поточні оцінки
 
-Бот читає таблиці з оцінками з локальної папки або Google Drive і дає студентам доступ лише до власних записів після авторизації email-адресою.
+Бот читає таблиці з оцінками з локальної директорії або Google Drive і дає студентам доступ лише до власних записів після авторизації email-адресою.
 
 ## Можливості
 
 - `/start` - авторизація або перегляд прив'язаної пошти.
 - `/stop` - припинити діалог із ботом і видалити прив'язану email-адресу.
 - `/email student@example.com` - змінити email.
-- `/refresh` - примусово перечитати таблиці з Google Drive або локальної папки.
+- `/refresh` - примусово перечитати таблиці з Google Drive або локальної директорії.
 - `/subjects` - перелік дисциплін, де знайдено email студента.
 - `/grades` - усі власні оцінки та пропуски з групуванням за датами й середнім балом за кожною дисципліною.
 - `/today` - записи за поточний день.
@@ -47,7 +47,7 @@ GRADES_LOCAL_DIR=C:\path\to\drive\folder
 GOOGLE_APPLICATION_CREDENTIALS=C:\path\to\service-account.json
 ```
 
-Якщо в локальній папці Google Drive файли мають вигляд `Назва дисципліни - Викладач.gsheet`, вони є ярликами Google Sheets, а не самими таблицями. Для таких файлів потрібен `GOOGLE_APPLICATION_CREDENTIALS`: бот витягне id таблиці з `.gsheet` і експортує Google Sheets у `.xlsx`.
+Якщо в локальній директорії Google Drive файли мають вигляд `Назва дисципліни - Викладач.gsheet`, вони є ярликами Google Sheets, а не самими таблицями. Для таких файлів потрібен `GOOGLE_APPLICATION_CREDENTIALS`: бот витягне id таблиці з `.gsheet` і експортує Google Sheets у `.xlsx`.
 
 Для Google Drive API:
 
@@ -58,8 +58,8 @@ GRADES_DRIVE_FOLDER_ID=google-drive-folder-id
 GOOGLE_APPLICATION_CREDENTIALS=C:\path\to\service-account.json
 ```
 
-Service account має мати доступ до папки з таблицями.
-`GRADES_DRIVE_FOLDER_ID` може бути raw ID папки або повним URL папки. У Drive-режимі бот читає native Google Sheets, `.xlsx` файли, shortcuts на Google Sheets і файли з назвою `*.gsheet`, експортуючи Google Sheets у `.xlsx` для парсингу.
+Service account має мати доступ до директорії з таблицями.
+`GRADES_DRIVE_FOLDER_ID` може бути raw ID директорії або повним URL директорії. У Drive-режимі бот читає native Google Sheets, `.xlsx` файли, shortcuts на Google Sheets і файли з назвою `*.gsheet`, експортуючи Google Sheets у `.xlsx` для парсингу.
 
 3. Запустіть бота:
 
