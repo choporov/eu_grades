@@ -1,5 +1,6 @@
 from datetime import date
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from openpyxl import Workbook
@@ -45,6 +46,23 @@ class GradesRepositoryTest(unittest.TestCase):
         self.assertEqual(entries[0].date, date(2026, 9, 1))
         self.assertEqual(entries[0].value, "11")
         self.assertEqual(entries[0].column_index, 4)
+
+    def test_repository_lists_discipline_when_student_has_no_grade_entries(self):
+        with TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "1 група"
+            sheet.append([None, "К0D201ДОФ26", None, date(2026, 9, 1)])
+            sheet.append([1, "Босецька Кіра Володимирівна", "k.bosetska@e-u.edu.ua"])
+            workbook.save(folder / "Біологія - Пушенко Л.М..xlsx")
+
+            repository = GradesRepository(LocalWorkbookProvider(folder), cache_ttl_seconds=3600)
+            grades = repository.get_student_grades("k.bosetska@e-u.edu.ua")
+
+        self.assertEqual(grades.student_name, "Босецька Кіра Володимирівна")
+        self.assertEqual(grades.disciplines, ("Біологія",))
+        self.assertEqual(grades.entries, ())
 
     def test_formatter_marks_low_and_high_values(self):
         entries = [

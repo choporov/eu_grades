@@ -109,13 +109,13 @@ class DriveWorkbookProviderTest(unittest.TestCase):
             )
         )
 
-    def test_drive_xlsx_skips_headerless_rows_without_third_column_email(self):
+    def test_drive_xlsx_lists_subject_without_grades_and_skips_technical_rows(self):
         workbook = Workbook()
         sheet = workbook.active
         sheet.title = "1 група"
         sheet.append([None, "К0D201ДОФ26", None, date(2026, 9, 1)])
         sheet.append([None, "subgroup@example.com", None, "12"])
-        sheet.append([1, "Студент", "student@example.com", "11"])
+        sheet.append([1, "Студент", "student@example.com"])
         workbook_bytes = BytesIO()
         workbook.save(workbook_bytes)
 
@@ -154,8 +154,9 @@ class DriveWorkbookProviderTest(unittest.TestCase):
             grades = repository.get_student_grades("student@example.com")
 
         self.assertEqual(grades.disciplines, ("Біологія",))
-        self.assertEqual(len(grades.entries), 1)
-        self.assertEqual(grades.entries[0].value, "11")
+        self.assertEqual(grades.student_name, "Студент")
+        self.assertEqual(grades.entries, ())
+        self.assertEqual(repository.get_student_grades("subgroup@example.com").disciplines, ())
 
     @staticmethod
     def _write_gsheet(content: str) -> Path:

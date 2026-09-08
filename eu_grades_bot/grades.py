@@ -34,6 +34,14 @@ class GradeEntry:
 
 
 @dataclass(frozen=True)
+class StudentRecord:
+    discipline: str
+    student_name: str
+    email: str
+    entries: tuple[GradeEntry, ...]
+
+
+@dataclass(frozen=True)
 class StudentGrades:
     email: str
     student_name: str | None
@@ -53,16 +61,16 @@ class GradesRepository:
         self._loaded_at = 0.0
         self._entries_by_email: dict[str, list[GradeEntry]] = {}
         self._names_by_email: dict[str, str] = {}
+        self._disciplines_by_email: dict[str, tuple[str, ...]] = {}
 
     def get_student_grades(self, email: str, force_reload: bool = False) -> StudentGrades:
         normalized_email = normalize_email(email)
         self._ensure_loaded(force_reload=force_reload)
         entries = tuple(sorted(self._entries_by_email.get(normalized_email, []), key=_entry_sort_key))
-        disciplines = tuple(dict.fromkeys(entry.discipline for entry in entries))
         return StudentGrades(
             email=normalized_email,
             student_name=self._names_by_email.get(normalized_email),
-            disciplines=disciplines,
+            disciplines=self._disciplines_by_email.get(normalized_email, ()),
             entries=entries,
         )
 
@@ -78,6 +86,7 @@ class GradesRepository:
     def reload(self) -> None:
         entries_by_email: dict[str, list[GradeEntry]] = defaultdict(list)
         names_by_email: dict[str, str] = {}
+        disciplines_by_email: dict[str, list[str]] = defaultdict(list)
 
         sources = self.provider.list_workbooks()
         logger.info("Loading grades from %d workbook(s).", len(sources))
@@ -85,20 +94,26 @@ class GradesRepository:
         for source in sources:
             discipline = discipline_from_title(source.title)
             source_entries = 0
-            for entry in iter_workbook_entries(source.path, discipline, source.title):
-                entries_by_email[entry.email].append(entry)
-                names_by_email.setdefault(entry.email, entry.student_name)
-                source_entries += 1
+            for student in iter_workbook_students(source.path, discipline, source.title):
+                entries_by_email[student.email].extend(student.entries)
+                names_by_email.setdefault(student.email, student.student_name)
+                if discipline not in disciplines_by_email[student.email]:
+                    disciplines_by_email[student.email].append(discipline)
+                source_entries += len(student.entries)
             total_entries += source_entries
             logger.info("Workbook %s produced %d grade/absence record(s).", source.title, source_entries)
 
         self._entries_by_email = dict(entries_by_email)
         self._names_by_email = names_by_email
+        self._disciplines_by_email = {
+            email: tuple(disciplines)
+            for email, disciplines in disciplines_by_email.items()
+        }
         self._loaded_at = time.monotonic()
         logger.info(
             "Loaded %d grade/absence record(s) for %d email(s).",
             total_entries,
-            len(self._entries_by_email),
+            len(self._names_by_email),
         )
 
 
@@ -118,15 +133,29 @@ def discipline_from_title(title: str) -> str:
 
 
 def iter_workbook_entries(path: Path, discipline: str, source_title: str | None = None) -> Iterable[GradeEntry]:
+    for student in iter_workbook_students(path, discipline, source_title):
+        yield from student.entries
+
+
+def iter_workbook_students(
+    path: Path,
+    discipline: str,
+    source_title: str | None = None,
+) -> Iterable[StudentRecord]:
     workbook = load_workbook(path, data_only=True, read_only=False)
     try:
         for sheet in workbook.worksheets:
-            yield from iter_sheet_entries(sheet, discipline, source_title or path.name)
+            yield from iter_sheet_students(sheet, discipline, source_title or path.name)
     finally:
         workbook.close()
 
 
 def iter_sheet_entries(sheet: Worksheet, discipline: str, source_file: str) -> Iterable[GradeEntry]:
+    for student in iter_sheet_students(sheet, discipline, source_file):
+        yield from student.entries
+
+
+def iter_sheet_students(sheet: Worksheet, discipline: str, source_file: str) -> Iterable[StudentRecord]:
     header_row = _find_header_row(sheet)
     if header_row is None:
         # Some exported grade books have no text headers: the first row contains
@@ -157,21 +186,30 @@ def iter_sheet_entries(sheet: Worksheet, discipline: str, source_file: str) -> I
         raw_name = sheet.cell(row=row_index, column=name_col).value if name_col else None
         student_name = str(raw_name).strip() if raw_name else ""
 
+        entries: list[GradeEntry] = []
         for column_index, entry_date in date_columns:
             raw_value = sheet.cell(row=row_index, column=column_index).value
             value = normalize_grade_value(raw_value)
             if value is None:
                 continue
-            yield GradeEntry(
-                discipline=discipline,
-                group=sheet.title,
-                student_name=student_name,
-                email=email,
-                date=entry_date,
-                value=value,
-                source_file=source_file,
-                column_index=column_index,
+            entries.append(
+                GradeEntry(
+                    discipline=discipline,
+                    group=sheet.title,
+                    student_name=student_name,
+                    email=email,
+                    date=entry_date,
+                    value=value,
+                    source_file=source_file,
+                    column_index=column_index,
+                )
             )
+        yield StudentRecord(
+            discipline=discipline,
+            student_name=student_name,
+            email=email,
+            entries=tuple(entries),
+        )
 
 
 def normalize_grade_value(raw_value) -> str | None:
