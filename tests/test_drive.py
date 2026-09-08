@@ -1,15 +1,22 @@
+from datetime import date
+from io import BytesIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+
+from openpyxl import Workbook
 
 from eu_grades_bot.drive import (
     GOOGLE_SHEETS_MIME,
     GOOGLE_SHORTCUT_MIME,
+    XLSX_MIME,
     DriveWorkbookProvider,
     LocalWorkbookProvider,
     extract_google_sheet_id_from_gsheet,
     is_gsheet_metadata_file,
     normalize_drive_id,
 )
+from eu_grades_bot.grades import GradesRepository
 
 
 class DriveWorkbookProviderTest(unittest.TestCase):
@@ -101,6 +108,54 @@ class DriveWorkbookProviderTest(unittest.TestCase):
                 }
             )
         )
+
+    def test_drive_xlsx_skips_headerless_rows_without_third_column_email(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "1 група"
+        sheet.append([None, "К0D201ДОФ26", None, date(2026, 9, 1)])
+        sheet.append([None, "subgroup@example.com", None, "12"])
+        sheet.append([1, "Студент", "student@example.com", "11"])
+        workbook_bytes = BytesIO()
+        workbook.save(workbook_bytes)
+
+        class FakeFilesResource:
+            def list(self, **kwargs):
+                return self
+
+            def execute(self):
+                return {
+                    "files": [
+                        {
+                            "id": "biology-id",
+                            "name": "Біологія - Пушенко Л.М..xlsx",
+                            "mimeType": XLSX_MIME,
+                        }
+                    ]
+                }
+
+            def get_media(self, fileId):
+                return workbook_bytes.getvalue()
+
+        class FakeDriveService:
+            def files(self):
+                return FakeFilesResource()
+
+        with TemporaryDirectory() as tmpdir:
+            provider = DriveWorkbookProvider(
+                "folder-id",
+                Path("credentials.json"),
+                Path(tmpdir) / "cache",
+            )
+            provider._build_service = lambda: FakeDriveService()
+            provider._download = lambda request, target: target.write_bytes(request)
+            repository = GradesRepository(provider, cache_ttl_seconds=3600)
+
+            grades = repository.get_student_grades("student@example.com")
+
+        self.assertEqual(grades.disciplines, ("Біологія",))
+        self.assertEqual(len(grades.entries), 1)
+        self.assertEqual(grades.entries[0].value, "11")
 
     @staticmethod
     def _write_gsheet(content: str) -> Path:

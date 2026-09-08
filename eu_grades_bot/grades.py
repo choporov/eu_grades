@@ -16,6 +16,8 @@ from .drive import WorkbookSource
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+HEADERLESS_NAME_COLUMN = 2
+HEADERLESS_EMAIL_COLUMN = 3
 logger = logging.getLogger(__name__)
 
 
@@ -127,13 +129,19 @@ def iter_workbook_entries(path: Path, discipline: str, source_title: str | None 
 def iter_sheet_entries(sheet: Worksheet, discipline: str, source_file: str) -> Iterable[GradeEntry]:
     header_row = _find_header_row(sheet)
     if header_row is None:
-        return
+        # Some exported grade books have no text headers: the first row contains
+        # dates, while student names and emails are stored in columns 2 and 3.
+        header_row = _find_date_header_row(sheet)
+        if header_row is None:
+            return
+        email_col = HEADERLESS_EMAIL_COLUMN
+        name_col = HEADERLESS_NAME_COLUMN
+    else:
+        email_col = _find_email_column(sheet, header_row)
+        if email_col is None:
+            return
+        name_col = _find_name_column(sheet, header_row)
 
-    email_col = _find_email_column(sheet, header_row)
-    if email_col is None:
-        return
-
-    name_col = _find_name_column(sheet, header_row)
     date_columns = _find_date_columns(sheet, header_row)
     if not date_columns:
         return
@@ -200,6 +208,13 @@ def numeric_grade(value: str) -> int | None:
 def _find_header_row(sheet: Worksheet) -> int | None:
     for row_index in range(1, min(sheet.max_row, 10) + 1):
         if _find_email_column(sheet, row_index) is not None:
+            return row_index
+    return None
+
+
+def _find_date_header_row(sheet: Worksheet) -> int | None:
+    for row_index in range(1, min(sheet.max_row, 10) + 1):
+        if _find_date_columns(sheet, row_index):
             return row_index
     return None
 

@@ -2,9 +2,11 @@ from datetime import date
 from pathlib import Path
 import unittest
 
+from openpyxl import Workbook
+
 from eu_grades_bot.drive import LocalWorkbookProvider
 from eu_grades_bot.formatting import format_entries, format_period_entries_by_date, format_today_entries
-from eu_grades_bot.grades import GradeEntry, GradesRepository, discipline_from_title
+from eu_grades_bot.grades import GradeEntry, GradesRepository, discipline_from_title, iter_sheet_entries
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +28,23 @@ class GradesRepositoryTest(unittest.TestCase):
         self.assertEqual(len(grades.entries), 10)
         self.assertTrue(any(entry.value == "в" for entry in grades.entries))
         self.assertTrue(any(entry.value == "3" for entry in grades.entries))
+
+    def test_headerless_sheet_skips_rows_without_email_in_third_column(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "1 група"
+        sheet.append([None, "К0D201ДОФ26", None, date(2026, 9, 1)])
+        sheet.append([None, "subgroup@example.com", None, "12"])
+        sheet.append([1, "Студент", "student@example.com", "11"])
+
+        entries = list(iter_sheet_entries(sheet, "Біологія", "Біологія.xlsx"))
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].student_name, "Студент")
+        self.assertEqual(entries[0].email, "student@example.com")
+        self.assertEqual(entries[0].date, date(2026, 9, 1))
+        self.assertEqual(entries[0].value, "11")
+        self.assertEqual(entries[0].column_index, 4)
 
     def test_formatter_marks_low_and_high_values(self):
         entries = [
