@@ -55,9 +55,15 @@ class WorkbookProvider(Protocol):
 
 
 class GradesRepository:
-    def __init__(self, provider: WorkbookProvider, cache_ttl_seconds: int = 300):
+    def __init__(
+        self,
+        provider: WorkbookProvider,
+        cache_ttl_seconds: int = 300,
+        reload_when_stale: bool = True,
+    ):
         self.provider = provider
         self.cache_ttl_seconds = cache_ttl_seconds
+        self.reload_when_stale = reload_when_stale
         self._loaded_at = 0.0
         self._entries_by_email: dict[str, list[GradeEntry]] = {}
         self._names_by_email: dict[str, str] = {}
@@ -78,7 +84,10 @@ class GradesRepository:
         if (
             not force_reload
             and self._loaded_at > 0
-            and time.monotonic() - self._loaded_at < self.cache_ttl_seconds
+            and (
+                not self.reload_when_stale
+                or time.monotonic() - self._loaded_at < self.cache_ttl_seconds
+            )
         ):
             return
         self.reload()

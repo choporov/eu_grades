@@ -40,7 +40,7 @@ HELP_TEXT = """Команди:
 /start - авторизація email
 /stop - припинити діалог і видалити email
 /email student@example.com - змінити email
-/refresh - перечитати таблиці з Drive/папки
+/refresh - примусово перечитати таблиці
 /subjects - перелік дисциплін
 /grades - усі оцінки та пропуски
 /grades today - за сьогодні
@@ -55,6 +55,8 @@ HELP_TEXT = """Команди:
 
 REPORT_MENU_TEXT = "Оберіть звіт:"
 REPORT_CALLBACK_PREFIX = "report:"
+DRIVE_REFRESH_INTERVAL_SECONDS = 15 * 60
+DRIVE_REFRESH_INITIAL_DELAY_SECONDS = 1
 
 
 class BotServices:
@@ -64,6 +66,7 @@ class BotServices:
         self.repository = GradesRepository(
             provider=create_provider(settings),
             cache_ttl_seconds=settings.cache_ttl_seconds,
+            reload_when_stale=settings.grades_source != "drive",
         )
 
 
@@ -133,6 +136,14 @@ def schedule_jobs(application: Application, settings: Settings) -> None:
     if application.job_queue is None:
         logger.warning("Job queue is unavailable. Install python-telegram-bot[job-queue].")
         return
+
+    if settings.grades_source == "drive":
+        application.job_queue.run_repeating(
+            refresh_drive_cache_job,
+            interval=DRIVE_REFRESH_INTERVAL_SECONDS,
+            first=DRIVE_REFRESH_INITIAL_DELAY_SECONDS,
+            name="drive-cache-refresh",
+        )
 
     application.job_queue.run_daily(
         daily_summary_job,
@@ -207,7 +218,7 @@ async def subjects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if user is None:
         return
     services = get_services(context)
-    grades = get_student_grades_with_drive_refresh(services, user.email)
+    grades = get_student_grades_cached(services, user.email)
     await update.message.reply_text(format_subjects(grades.disciplines))
 
 
@@ -217,7 +228,10 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     services = get_services(context)
     grades = services.repository.get_student_grades(user.email, force_reload=True)
-    await update.message.reply_text(format_subjects(grades.disciplines), reply_markup=report_menu_keyboard())
+    await update.message.reply_text(
+        format_subjects(grades.disciplines),
+        reply_markup=report_menu_keyboard(),
+    )
 
 
 async def report_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -443,6 +457,14 @@ async def daily_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_scheduled_daily_summary(context, today)
 
 
+async def refresh_drive_cache_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    services = get_services(context)
+    try:
+        services.repository.reload()
+    except Exception:
+        logger.exception("Failed to refresh grades cache from Google Drive.")
+
+
 async def weekly_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     services = get_services(context)
     today = today_in(services.settings.timezone)
@@ -462,7 +484,6 @@ async def send_scheduled_summary(
     empty_text: str,
 ) -> None:
     services = get_services(context)
-    reload_repository_for_scheduled_run(services)
     for user in services.storage.all_users():
         grades = services.repository.get_student_grades(user.email)
         entries = date_range_filter(list(grades.entries), start, end)
@@ -482,7 +503,6 @@ async def send_scheduled_summary(
 
 async def send_scheduled_daily_summary(context: ContextTypes.DEFAULT_TYPE, today) -> None:
     services = get_services(context)
-    reload_repository_for_scheduled_run(services)
     for user in services.storage.all_users():
         grades = services.repository.get_student_grades(user.email)
         entries = date_range_filter(list(grades.entries), today, today)
@@ -521,15 +541,3 @@ def get_services(context: ContextTypes.DEFAULT_TYPE) -> BotServices:
 
 def get_student_grades_cached(services: BotServices, email: str):
     return services.repository.get_student_grades(email)
-
-
-def get_student_grades_with_drive_refresh(services: BotServices, email: str):
-    return services.repository.get_student_grades(
-        email,
-        force_reload=services.settings.grades_source == "drive",
-    )
-
-
-def reload_repository_for_scheduled_run(services: BotServices) -> None:
-    if services.settings.grades_source == "drive":
-        services.repository.reload()

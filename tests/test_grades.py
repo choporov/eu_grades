@@ -64,6 +64,32 @@ class GradesRepositoryTest(unittest.TestCase):
         self.assertEqual(grades.disciplines, ("Біологія",))
         self.assertEqual(grades.entries, ())
 
+    def test_repository_can_leave_stale_cache_for_background_refresh(self):
+        class CountingProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def list_workbooks(self):
+                self.calls += 1
+                return []
+
+        provider = CountingProvider()
+        repository = GradesRepository(
+            provider,
+            cache_ttl_seconds=1,
+            reload_when_stale=False,
+        )
+
+        repository.get_student_grades("student@example.com")
+        repository._loaded_at -= 10
+        repository.get_student_grades("student@example.com")
+
+        self.assertEqual(provider.calls, 1)
+
+        repository.get_student_grades("student@example.com", force_reload=True)
+
+        self.assertEqual(provider.calls, 2)
+
     def test_formatter_marks_low_and_high_values(self):
         entries = [
             GradeEntry(
