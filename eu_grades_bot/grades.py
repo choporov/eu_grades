@@ -5,8 +5,9 @@ import time
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Iterable, Protocol
 
 from openpyxl import load_workbook
@@ -49,6 +50,19 @@ class StudentGrades:
     entries: tuple[GradeEntry, ...]
 
 
+class CacheNotReadyError(RuntimeError):
+    """No complete workbook snapshot has been loaded yet."""
+
+
+@dataclass(frozen=True)
+class _GradesSnapshot:
+    entries_by_email: dict[str, tuple[GradeEntry, ...]]
+    names_by_email: dict[str, str]
+    disciplines_by_email: dict[str, tuple[str, ...]]
+    completed_at: datetime
+    loaded_monotonic: float
+
+
 class WorkbookProvider(Protocol):
     def list_workbooks(self) -> list[WorkbookSource]:
         ...
@@ -64,29 +78,44 @@ class GradesRepository:
         self.provider = provider
         self.cache_ttl_seconds = cache_ttl_seconds
         self.reload_when_stale = reload_when_stale
-        self._loaded_at = 0.0
-        self._entries_by_email: dict[str, list[GradeEntry]] = {}
-        self._names_by_email: dict[str, str] = {}
-        self._disciplines_by_email: dict[str, tuple[str, ...]] = {}
+        self._snapshot: _GradesSnapshot | None = None
+        self._snapshot_lock = Lock()
+
+    def _get_snapshot(self) -> _GradesSnapshot | None:
+        with self._snapshot_lock:
+            return self._snapshot
+
+    def cache_info(self) -> tuple[datetime | None, float | None]:
+        snapshot = self._get_snapshot()
+        if snapshot is None:
+            return None, None
+        return snapshot.completed_at, max(0.0, time.monotonic() - snapshot.loaded_monotonic)
 
     def get_student_grades(self, email: str, force_reload: bool = False) -> StudentGrades:
-        normalized_email = normalize_email(email)
         self._ensure_loaded(force_reload=force_reload)
-        entries = tuple(sorted(self._entries_by_email.get(normalized_email, []), key=_entry_sort_key))
+        return self.get_cached_student_grades(email)
+
+    def get_cached_student_grades(self, email: str) -> StudentGrades:
+        """Read one complete snapshot without any file or network access."""
+        snapshot = self._get_snapshot()
+        if snapshot is None:
+            raise CacheNotReadyError("Grades cache has not been loaded yet.")
+        normalized_email = normalize_email(email)
         return StudentGrades(
             email=normalized_email,
-            student_name=self._names_by_email.get(normalized_email),
-            disciplines=self._disciplines_by_email.get(normalized_email, ()),
-            entries=entries,
+            student_name=snapshot.names_by_email.get(normalized_email),
+            disciplines=snapshot.disciplines_by_email.get(normalized_email, ()),
+            entries=snapshot.entries_by_email.get(normalized_email, ()),
         )
 
     def _ensure_loaded(self, force_reload: bool = False) -> None:
+        _, age_seconds = self.cache_info()
         if (
             not force_reload
-            and self._loaded_at > 0
+            and age_seconds is not None
             and (
                 not self.reload_when_stale
-                or time.monotonic() - self._loaded_at < self.cache_ttl_seconds
+                or age_seconds < self.cache_ttl_seconds
             )
         ):
             return
@@ -112,17 +141,29 @@ class GradesRepository:
             total_entries += source_entries
             logger.info("Workbook %s produced %d grade/absence record(s).", source.title, source_entries)
 
-        self._entries_by_email = dict(entries_by_email)
-        self._names_by_email = names_by_email
-        self._disciplines_by_email = {
+        sorted_entries = {
+            email: tuple(sorted(entries, key=_entry_sort_key))
+            for email, entries in entries_by_email.items()
+        }
+        disciplines = {
             email: tuple(disciplines)
             for email, disciplines in disciplines_by_email.items()
         }
-        self._loaded_at = time.monotonic()
+        snapshot = _GradesSnapshot(
+            entries_by_email=sorted_entries,
+            names_by_email=names_by_email,
+            disciplines_by_email=disciplines,
+            completed_at=datetime.now(timezone.utc),
+            loaded_monotonic=time.monotonic(),
+        )
+        # The worker publishes only after every workbook has been parsed. Readers
+        # retain the old snapshot while downloads/parsing are in progress.
+        with self._snapshot_lock:
+            self._snapshot = snapshot
         logger.info(
             "Loaded %d grade/absence record(s) for %d email(s).",
             total_entries,
-            len(self._names_by_email),
+            len(names_by_email),
         )
 
 

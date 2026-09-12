@@ -4,7 +4,9 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="e1a578d0-973c-42f7-ac0f-1c81e84ef98e" name="Changes" comment="skip rows" />
+    <list default="true" id="e1a578d0-973c-42f7-ac0f-1c81e84ef98e" name="Changes" comment="skip rows">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -76,7 +78,7 @@
       <updated>1778760219274</updated>
       <workItem from="1778760266493" duration="959000" />
       <workItem from="1783688434890" duration="3320000" />
-      <workItem from="1788874244000" duration="911000" />
+      <workItem from="1788874244000" duration="1518000" />
     </task>
     <task id="LOCAL-00001" summary="spelling fixes">
       <option name="closed" value="true" />

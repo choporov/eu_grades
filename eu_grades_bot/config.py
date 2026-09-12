@@ -19,6 +19,7 @@ class Settings:
     data_dir: Path
     cache_ttl_seconds: int
     send_empty_summaries: bool
+    cache_stale_after_seconds: int = 1800
 
 
 def _bool_from_env(name: str, default: bool) -> bool:
@@ -53,5 +54,5 @@ def load_settings() -> Settings:
         data_dir=data_dir,
         cache_ttl_seconds=int(os.getenv("CACHE_TTL_SECONDS", "300")),
         send_empty_summaries=_bool_from_env("SEND_EMPTY_SUMMARIES", True),
+        cache_stale_after_seconds=int(os.getenv("CACHE_STALE_AFTER_SECONDS", "1800")),
     )
-

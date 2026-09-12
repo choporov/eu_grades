@@ -2,6 +2,7 @@ from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from openpyxl import Workbook
 
@@ -80,9 +81,10 @@ class GradesRepositoryTest(unittest.TestCase):
             reload_when_stale=False,
         )
 
-        repository.get_student_grades("student@example.com")
-        repository._loaded_at -= 10
-        repository.get_student_grades("student@example.com")
+        with patch("eu_grades_bot.grades.time.monotonic", return_value=100) as clock:
+            repository.get_student_grades("student@example.com")
+            clock.return_value = 110
+            repository.get_student_grades("student@example.com")
 
         self.assertEqual(provider.calls, 1)
 

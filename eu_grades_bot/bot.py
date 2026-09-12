@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import time
+from datetime import datetime, time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -15,6 +16,7 @@ from telegram.ext import (
     filters,
 )
 
+from .cache import GradesCache
 from .config import Settings, load_settings
 from .dates import current_week_bounds, date_range_filter, previous_week_bounds, today_in
 from .drive import DriveWorkbookProvider, LocalWorkbookProvider
@@ -25,7 +27,7 @@ from .formatting import (
     format_today_entries,
     split_telegram_message,
 )
-from .grades import GradesRepository, is_valid_email, normalize_email
+from .grades import CacheNotReadyError, GradesRepository, is_valid_email, normalize_email
 from .storage import UserStorage
 
 
@@ -41,6 +43,7 @@ HELP_TEXT = """Команди:
 /stop - припинити діалог і видалити email
 /email student@example.com - змінити email
 /refresh - примусово перечитати таблиці
+/cache - стан кешу та час останнього оновлення
 /subjects - перелік дисциплін
 /grades - усі оцінки та пропуски
 /grades today - за сьогодні
@@ -68,6 +71,7 @@ class BotServices:
             cache_ttl_seconds=settings.cache_ttl_seconds,
             reload_when_stale=settings.grades_source != "drive",
         )
+        self.cache = GradesCache(self.repository, settings.cache_stale_after_seconds)
 
 
 def create_provider(settings: Settings):
@@ -111,14 +115,21 @@ def main() -> None:
 
 
 def build_application(settings: Settings, services: BotServices) -> Application:
-    application = ApplicationBuilder().token(settings.telegram_bot_token).build()
+    application = (
+        ApplicationBuilder()
+        .token(settings.telegram_bot_token)
+        .post_stop(wait_for_cache_refresh)
+        .build()
+    )
     application.bot_data["services"] = services
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("email", email_command))
-    application.add_handler(CommandHandler("refresh", refresh_command))
+    # Waiting for a refresh must not hold PTB's sequential update processing queue.
+    application.add_handler(CommandHandler("refresh", refresh_command, block=False))
+    application.add_handler(CommandHandler("cache", cache_command))
     application.add_handler(CommandHandler("subjects", subjects_command))
     application.add_handler(CommandHandler("grades", grades_command))
     application.add_handler(CommandHandler("today", today_command))
@@ -127,6 +138,7 @@ def build_application(settings: Settings, services: BotServices) -> Application:
     application.add_handler(CommandHandler("subject", subject_command))
     application.add_handler(CallbackQueryHandler(report_menu_callback, pattern=f"^{REPORT_CALLBACK_PREFIX}"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, email_message))
+    application.add_error_handler(handle_bot_error)
 
     schedule_jobs(application, settings)
     return application
@@ -134,6 +146,8 @@ def build_application(settings: Settings, services: BotServices) -> Application:
 
 def schedule_jobs(application: Application, settings: Settings) -> None:
     if application.job_queue is None:
+        if settings.grades_source == "drive":
+            raise RuntimeError("Drive refresh requires python-telegram-bot[job-queue].")
         logger.warning("Job queue is unavailable. Install python-telegram-bot[job-queue].")
         return
 
@@ -167,8 +181,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Введіть адресу електронної пошти для авторизації.")
         return
 
-    grades = get_student_grades_cached(services, user.email)
+    grades = await get_student_grades_cached(services, user.email)
     message = f"Ви авторизовані як {user.email}.\n\n{format_subjects(grades.disciplines)}"
+    message = with_cache_warning(services, message)
     await update.message.reply_text(message, reply_markup=report_menu_keyboard())
 
 
@@ -209,8 +224,11 @@ async def authorize_email(update: Update, context: ContextTypes.DEFAULT_TYPE, em
     chat_id = require_chat_id(update)
     normalized_email = normalize_email(email)
     services.storage.set_email(chat_id, normalized_email)
-    grades = get_student_grades_cached(services, normalized_email)
-    await update.message.reply_text(format_subjects(grades.disciplines), reply_markup=report_menu_keyboard())
+    grades = await get_student_grades_cached(services, normalized_email)
+    await update.message.reply_text(
+        with_cache_warning(services, format_subjects(grades.disciplines)),
+        reply_markup=report_menu_keyboard(),
+    )
 
 
 async def subjects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -218,8 +236,8 @@ async def subjects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if user is None:
         return
     services = get_services(context)
-    grades = get_student_grades_cached(services, user.email)
-    await update.message.reply_text(format_subjects(grades.disciplines))
+    grades = await get_student_grades_cached(services, user.email)
+    await update.message.reply_text(with_cache_warning(services, format_subjects(grades.disciplines)))
 
 
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -227,11 +245,30 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if user is None:
         return
     services = get_services(context)
-    grades = services.repository.get_student_grades(user.email, force_reload=True)
+    already_refreshing = services.cache.status.refreshing
+    refresh_task = services.cache.start_refresh()
     await update.message.reply_text(
-        format_subjects(grades.disciplines),
+        "Оновлення вже триває. Повідомлю про результат."
+        if already_refreshing else "Оновлюю таблиці. Повідомлю про результат."
+    )
+    try:
+        await asyncio.shield(refresh_task)
+    except Exception:
+        await update.message.reply_text(
+            "Не вдалося оновити таблиці.\n\n" + format_cache_status(services),
+        )
+        return
+    grades = await get_student_grades_cached(services, user.email)
+    await update.message.reply_text(
+        format_subjects(grades.disciplines) + "\n\n" + format_cache_status(services),
         reply_markup=report_menu_keyboard(),
     )
+
+
+async def cache_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await require_authorized_user(update, context) is None:
+        return
+    await update.message.reply_text(format_cache_status(get_services(context)))
 
 
 async def report_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -319,7 +356,7 @@ async def send_entries(
     subject_query: str | None = None,
 ) -> None:
     services = get_services(context)
-    grades = get_student_grades_cached(services, email)
+    grades = await get_student_grades_cached(services, email)
     entries = list(date_range_filter(list(grades.entries), start, end))
 
     if subject_query:
@@ -329,6 +366,7 @@ async def send_entries(
             empty_text = f"Записів з дисципліни «{subject_query}» не знайдено."
 
     text = format_entries(entries, empty_text=empty_text)
+    text = with_cache_warning(services, text)
     for chunk in split_telegram_message(text):
         await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
 
@@ -347,12 +385,13 @@ async def send_all_grades_report_to_chat(
     email: str,
 ) -> None:
     services = get_services(context)
-    grades = get_student_grades_cached(services, email)
+    grades = await get_student_grades_cached(services, email)
     text = format_period_entries_by_date(
         list(grades.entries),
         empty_text="Оцінок і пропусків не знайдено.",
         include_discipline_averages=True,
     )
+    text = with_cache_warning(services, text)
     for chunk in split_telegram_message(text):
         await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML)
 
@@ -375,9 +414,10 @@ async def send_period_entries_to_chat(
     services = get_services(context)
     today = today_in(services.settings.timezone)
     if period == "today":
-        grades = get_student_grades_cached(services, email)
+        grades = await get_student_grades_cached(services, email)
         entries = list(date_range_filter(list(grades.entries), today, today))
         text = format_today_entries(entries, grades.disciplines, today)
+        text = with_cache_warning(services, text)
         for chunk in split_telegram_message(text):
             await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML)
     elif period == "week":
@@ -429,9 +469,10 @@ async def send_date_grouped_period_entries_to_chat(
     empty_text: str,
 ) -> None:
     services = get_services(context)
-    grades = get_student_grades_cached(services, email)
+    grades = await get_student_grades_cached(services, email)
     entries = list(date_range_filter(list(grades.entries), start, end))
     text = format_period_entries_by_date(entries, empty_text=empty_text)
+    text = with_cache_warning(services, text)
     for chunk in split_telegram_message(text):
         await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML)
 
@@ -460,9 +501,9 @@ async def daily_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def refresh_drive_cache_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     services = get_services(context)
     try:
-        services.repository.reload()
+        await services.cache.refresh()
     except Exception:
-        logger.exception("Failed to refresh grades cache from Google Drive.")
+        pass  # The shared cache records and logs the failure for every caller.
 
 
 async def weekly_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -485,11 +526,16 @@ async def send_scheduled_summary(
 ) -> None:
     services = get_services(context)
     for user in services.storage.all_users():
-        grades = services.repository.get_student_grades(user.email)
+        try:
+            grades = await get_student_grades_cached(services, user.email)
+        except CacheNotReadyError:
+            logger.warning("Skipping scheduled summary: grades cache is not ready.")
+            return
         entries = date_range_filter(list(grades.entries), start, end)
         if not entries and not services.settings.send_empty_summaries:
             continue
         text = format_period_entries_by_date(entries, empty_text=empty_text)
+        text = with_cache_warning(services, text)
         for chunk in split_telegram_message(text):
             try:
                 await context.bot.send_message(
@@ -504,11 +550,16 @@ async def send_scheduled_summary(
 async def send_scheduled_daily_summary(context: ContextTypes.DEFAULT_TYPE, today) -> None:
     services = get_services(context)
     for user in services.storage.all_users():
-        grades = services.repository.get_student_grades(user.email)
+        try:
+            grades = await get_student_grades_cached(services, user.email)
+        except CacheNotReadyError:
+            logger.warning("Skipping scheduled daily summary: grades cache is not ready.")
+            return
         entries = date_range_filter(list(grades.entries), today, today)
         if not entries and not services.settings.send_empty_summaries:
             continue
         text = format_today_entries(entries, grades.disciplines, today)
+        text = with_cache_warning(services, text)
         for chunk in split_telegram_message(text):
             try:
                 await context.bot.send_message(
@@ -539,5 +590,57 @@ def get_services(context: ContextTypes.DEFAULT_TYPE) -> BotServices:
     return context.application.bot_data["services"]
 
 
-def get_student_grades_cached(services: BotServices, email: str):
-    return services.repository.get_student_grades(email)
+async def get_student_grades_cached(services: BotServices, email: str):
+    return await services.cache.get_student_grades(email)
+
+
+def format_cache_time(services: BotServices, value: datetime | None) -> str:
+    if value is None:
+        return "ще не було"
+    return value.astimezone(services.settings.timezone).strftime("%d.%m.%Y %H:%M:%S %Z")
+
+
+def format_cache_status(services: BotServices) -> str:
+    status = services.cache.status
+    lines = [f"Останнє успішне оновлення: {format_cache_time(services, status.last_success_at)}."]
+    if status.age_seconds is not None:
+        lines.append(f"Вік кешу: {int(status.age_seconds // 60)} хв.")
+        if status.stale:
+            lines.append("⚠️ Дані можуть бути застарілими.")
+    else:
+        lines.append("Дані ще не завантажені.")
+    if status.refreshing:
+        lines.append("Оновлення триває.")
+    if status.last_failure_at is not None:
+        lines.append(f"Остання помилка оновлення: {format_cache_time(services, status.last_failure_at)}.")
+        if status.last_success_at is not None:
+            lines.append("Бот використовує попередні успішно завантажені дані.")
+    return "\n".join(lines)
+
+
+def with_cache_warning(services: BotServices, text: str) -> str:
+    status = services.cache.status
+    if status.stale and status.last_success_at is not None:
+        return (
+            "⚠️ Дані можуть бути застарілими. Останнє успішне оновлення: "
+            f"{format_cache_time(services, status.last_success_at)}.\n\n{text}"
+        )
+    return text
+
+
+async def handle_bot_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if isinstance(context.error, CacheNotReadyError):
+        if isinstance(update, Update) and update.effective_chat is not None:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=(
+                    "Таблиці ще не завантажені. Спробуйте пізніше. "
+                    "Стан оновлення: /cache. Ручне оновлення: /refresh."
+                ),
+            )
+        return
+    logger.error("Failed to handle bot update.", exc_info=context.error)
+
+
+async def wait_for_cache_refresh(application: Application) -> None:
+    await application.bot_data["services"].cache.wait_for_refresh()
