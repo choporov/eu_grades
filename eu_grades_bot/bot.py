@@ -29,6 +29,7 @@ from .formatting import (
 )
 from .grades import CacheNotReadyError, GradesRepository, is_valid_email, normalize_email
 from .storage import UserStorage
+from .update_log import UpdateLog
 
 
 logging.basicConfig(
@@ -66,20 +67,23 @@ class BotServices:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.storage = UserStorage(settings.data_dir / "users.json")
+        self.update_log = UpdateLog(settings.data_dir / "update.log", settings.timezone)
         self.repository = GradesRepository(
-            provider=create_provider(settings),
+            provider=create_provider(settings, update_log=self.update_log),
             cache_ttl_seconds=settings.cache_ttl_seconds,
             reload_when_stale=settings.grades_source != "drive",
+            update_log=self.update_log,
         )
         self.cache = GradesCache(self.repository, settings.cache_stale_after_seconds)
 
 
-def create_provider(settings: Settings):
+def create_provider(settings: Settings, update_log: UpdateLog | None = None):
     if settings.grades_source == "local":
         return LocalWorkbookProvider(
             settings.local_grades_dir,
             credentials_file=settings.google_credentials_file,
             cache_dir=settings.data_dir / "local_gsheet_cache",
+            update_log=update_log,
         )
     if not settings.drive_folder_id:
         raise ValueError("GRADES_DRIVE_FOLDER_ID is required for GRADES_SOURCE=drive.")
@@ -89,6 +93,7 @@ def create_provider(settings: Settings):
         folder_id=settings.drive_folder_id,
         credentials_file=settings.google_credentials_file,
         cache_dir=settings.data_dir / "drive_cache",
+        update_log=update_log,
     )
 
 

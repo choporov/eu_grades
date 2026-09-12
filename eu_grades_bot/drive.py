@@ -7,6 +7,8 @@ import json
 import logging
 from pathlib import Path
 
+from .update_log import UpdateLog
+
 
 GOOGLE_SHEETS_MIME = "application/vnd.google-apps.spreadsheet"
 GOOGLE_SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
@@ -19,6 +21,7 @@ logger = logging.getLogger(__name__)
 class WorkbookSource:
     title: str
     path: Path
+    drive_name: str | None = None
 
 
 class LocalWorkbookProvider:
@@ -27,10 +30,12 @@ class LocalWorkbookProvider:
         folder: Path,
         credentials_file: Path | None = None,
         cache_dir: Path | None = None,
+        update_log: UpdateLog | None = None,
     ):
         self.folder = folder
         self.credentials_file = credentials_file
         self.cache_dir = cache_dir
+        self.update_log = update_log
 
     def list_workbooks(self) -> list[WorkbookSource]:
         if not self.folder.exists():
@@ -74,17 +79,27 @@ class LocalWorkbookProvider:
             safe_name = DriveWorkbookProvider._safe_filename(path.stem)
             target = cache_dir / f"{spreadsheet_id}-{safe_name}.xlsx"
             request = service.files().export_media(fileId=spreadsheet_id, mimeType=XLSX_MIME)
+            action = "update" if target.exists() else "new"
             download_media(request, target)
-            workbooks.append(WorkbookSource(title=path.stem, path=target))
+            if self.update_log is not None:
+                self.update_log.log_cache_update(path.name, target, action)
+            workbooks.append(WorkbookSource(title=path.stem, path=target, drive_name=path.name))
 
         return workbooks
 
 
 class DriveWorkbookProvider:
-    def __init__(self, folder_id: str, credentials_file: Path, cache_dir: Path):
+    def __init__(
+        self,
+        folder_id: str,
+        credentials_file: Path,
+        cache_dir: Path,
+        update_log: UpdateLog | None = None,
+    ):
         self.folder_id = normalize_drive_id(folder_id)
         self.credentials_file = credentials_file
         self.cache_dir = cache_dir
+        self.update_log = update_log
 
     def list_workbooks(self) -> list[WorkbookSource]:
         service = self._build_service()
@@ -115,8 +130,8 @@ class DriveWorkbookProvider:
             else:
                 request = service.files().get_media(fileId=file_id)
 
-            self._download(request, target)
-            workbooks.append(WorkbookSource(title=Path(name).stem, path=target))
+            self._download_workbook(request, target, name)
+            workbooks.append(WorkbookSource(title=Path(name).stem, path=target, drive_name=name))
 
         logger.info("Drive folder %s produced %d workbook(s).", self.folder_id, len(workbooks))
         return workbooks
@@ -135,8 +150,14 @@ class DriveWorkbookProvider:
 
         xlsx_target = self.cache_dir / f"{spreadsheet_id}-{self._safe_filename(Path(name).stem)}.xlsx"
         export_request = service.files().export_media(fileId=spreadsheet_id, mimeType=XLSX_MIME)
-        self._download(export_request, xlsx_target)
-        return WorkbookSource(title=Path(name).stem, path=xlsx_target)
+        self._download_workbook(export_request, xlsx_target, name)
+        return WorkbookSource(title=Path(name).stem, path=xlsx_target, drive_name=name)
+
+    def _download_workbook(self, request, target: Path, drive_name: str) -> None:
+        action = "update" if target.exists() else "new"
+        self._download(request, target)
+        if self.update_log is not None:
+            self.update_log.log_cache_update(drive_name, target, action)
 
     def _build_service(self):
         return build_drive_service(self.credentials_file)

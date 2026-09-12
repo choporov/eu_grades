@@ -4,7 +4,7 @@ import re
 import time
 import logging
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -14,6 +14,7 @@ from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .drive import WorkbookSource
+from .update_log import UpdateLog
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -40,6 +41,44 @@ class StudentRecord:
     student_name: str
     email: str
     entries: tuple[GradeEntry, ...]
+
+
+@dataclass
+class WorkbookParseStats:
+    groups: list[str] = field(default_factory=list)
+    students: set[str] = field(default_factory=set)
+    student_rows_count: int = 0
+    grade_dates: set[date] = field(default_factory=set)
+    absence_dates: set[date] = field(default_factory=set)
+    grades_count: int = 0
+    absences_count: int = 0
+    other_values_count: int = 0
+
+    def observe(self, student: StudentRecord) -> None:
+        self.students.add(student.email)
+        self.student_rows_count += 1
+        for entry in student.entries:
+            if is_absence(entry.value):
+                self.absences_count += 1
+                self.absence_dates.add(entry.date)
+            elif (grade := numeric_grade(entry.value)) is not None and 1 <= grade <= 12:
+                self.grades_count += 1
+                self.grade_dates.add(entry.date)
+            else:
+                self.other_values_count += 1
+
+    def log_fields(self) -> dict:
+        return {
+            "groups_count": len(self.groups),
+            "groups": self.groups,
+            "students_count": len(self.students),
+            "student_rows_count": self.student_rows_count,
+            "grade_dates": [day.isoformat() for day in sorted(self.grade_dates)],
+            "absence_dates": [day.isoformat() for day in sorted(self.absence_dates)],
+            "grades_count": self.grades_count,
+            "absences_count": self.absences_count,
+            "other_values_count": self.other_values_count,
+        }
 
 
 @dataclass(frozen=True)
@@ -74,10 +113,12 @@ class GradesRepository:
         provider: WorkbookProvider,
         cache_ttl_seconds: int = 300,
         reload_when_stale: bool = True,
+        update_log: UpdateLog | None = None,
     ):
         self.provider = provider
         self.cache_ttl_seconds = cache_ttl_seconds
         self.reload_when_stale = reload_when_stale
+        self.update_log = update_log
         self._snapshot: _GradesSnapshot | None = None
         self._snapshot_lock = Lock()
 
@@ -132,12 +173,23 @@ class GradesRepository:
         for source in sources:
             discipline = discipline_from_title(source.title)
             source_entries = 0
-            for student in iter_workbook_students(source.path, discipline, source.title):
-                entries_by_email[student.email].extend(student.entries)
-                names_by_email.setdefault(student.email, student.student_name)
-                if discipline not in disciplines_by_email[student.email]:
-                    disciplines_by_email[student.email].append(discipline)
-                source_entries += len(student.entries)
+            stats = WorkbookParseStats()
+            try:
+                students = (
+                    iter_workbook_students(source.path, discipline, source.title, statistics=stats)
+                    if self.update_log is not None
+                    else iter_workbook_students(source.path, discipline, source.title)
+                )
+                for student in students:
+                    entries_by_email[student.email].extend(student.entries)
+                    names_by_email.setdefault(student.email, student.student_name)
+                    if discipline not in disciplines_by_email[student.email]:
+                        disciplines_by_email[student.email].append(discipline)
+                    source_entries += len(student.entries)
+            except Exception as exc:
+                self._log_parse_result(source, discipline, stats, error=exc)
+                raise
+            self._log_parse_result(source, discipline, stats)
             total_entries += source_entries
             logger.info("Workbook %s produced %d grade/absence record(s).", source.title, source_entries)
 
@@ -149,6 +201,12 @@ class GradesRepository:
             email: tuple(disciplines)
             for email, disciplines in disciplines_by_email.items()
         }
+        if self.update_log is not None:
+            self.update_log.reconcile_sources(
+                (source.drive_name, source.path)
+                for source in sources
+                if source.drive_name is not None
+            )
         snapshot = _GradesSnapshot(
             entries_by_email=sorted_entries,
             names_by_email=names_by_email,
@@ -164,6 +222,29 @@ class GradesRepository:
             "Loaded %d grade/absence record(s) for %d email(s).",
             total_entries,
             len(names_by_email),
+        )
+
+    def _log_parse_result(
+        self,
+        source: WorkbookSource,
+        discipline: str,
+        stats: WorkbookParseStats,
+        error: Exception | None = None,
+    ) -> None:
+        if self.update_log is None:
+            return
+        details = stats.log_fields()
+        if error is not None:
+            details["error_type"] = type(error).__name__
+            details["error"] = str(error)
+        self.update_log.log_parse_result(
+            source.drive_name or source.path.name,
+            source.path,
+            drive_file=source.drive_name,
+            status="error" if error is not None else "success",
+            discipline=discipline,
+            teacher=teacher_from_title(source.drive_name or source.title),
+            **details,
         )
 
 
@@ -182,6 +263,16 @@ def discipline_from_title(title: str) -> str:
     return stem.strip()
 
 
+def teacher_from_title(title: str) -> str | None:
+    # Strip only workbook extensions; dots in a teacher's initials are meaningful.
+    suffix = Path(title).suffix
+    if suffix.lower() in {".xlsx", ".xlsm", ".gsheet"}:
+        title = title[:-len(suffix)]
+    if " - " not in title:
+        return None
+    return title.rsplit(" - ", 1)[1].strip() or None
+
+
 def iter_workbook_entries(path: Path, discipline: str, source_title: str | None = None) -> Iterable[GradeEntry]:
     for student in iter_workbook_students(path, discipline, source_title):
         yield from student.entries
@@ -191,11 +282,17 @@ def iter_workbook_students(
     path: Path,
     discipline: str,
     source_title: str | None = None,
+    statistics: WorkbookParseStats | None = None,
 ) -> Iterable[StudentRecord]:
     workbook = load_workbook(path, data_only=True, read_only=False)
     try:
+        if statistics is not None:
+            statistics.groups.extend(sheet.title for sheet in workbook.worksheets)
         for sheet in workbook.worksheets:
-            yield from iter_sheet_students(sheet, discipline, source_title or path.name)
+            for student in iter_sheet_students(sheet, discipline, source_title or path.name):
+                if statistics is not None:
+                    statistics.observe(student)
+                yield student
     finally:
         workbook.close()
 
