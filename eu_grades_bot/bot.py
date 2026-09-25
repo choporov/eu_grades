@@ -60,7 +60,6 @@ HELP_TEXT = """Команди:
 REPORT_MENU_TEXT = "Оберіть звіт:"
 REPORT_CALLBACK_PREFIX = "report:"
 DRIVE_REFRESH_INTERVAL_SECONDS = 15 * 60
-DRIVE_REFRESH_INITIAL_DELAY_SECONDS = 1
 
 
 class BotServices:
@@ -123,9 +122,14 @@ def build_application(settings: Settings, services: BotServices) -> Application:
     application = (
         ApplicationBuilder()
         .token(settings.telegram_bot_token)
+        .post_init(start_background_jobs)
         .post_stop(wait_for_cache_refresh)
+        # post_stop is skipped if polling fails before Application.start().
+        .post_shutdown(wait_for_cache_refresh)
         .build()
     )
+    if settings.grades_source == "drive" and application.job_queue is None:
+        raise RuntimeError("Drive refresh requires python-telegram-bot[job-queue].")
     application.bot_data["services"] = services
 
     application.add_handler(CommandHandler("start", start))
@@ -145,8 +149,17 @@ def build_application(settings: Settings, services: BotServices) -> Application:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, email_message))
     application.add_error_handler(handle_bot_error)
 
-    schedule_jobs(application, settings)
     return application
+
+
+async def start_background_jobs(application: Application) -> None:
+    services = application.bot_data["services"]
+    # Anchor the periodic schedule after initialization, not at app construction.
+    schedule_jobs(application, services.settings)
+    if services.settings.grades_source == "drive":
+        # Kick off the shared worker without delaying message processing or
+        # depending on the scheduler's handling of missed interval start times.
+        services.cache.start_refresh()
 
 
 def schedule_jobs(application: Application, settings: Settings) -> None:
@@ -160,7 +173,7 @@ def schedule_jobs(application: Application, settings: Settings) -> None:
         application.job_queue.run_repeating(
             refresh_drive_cache_job,
             interval=DRIVE_REFRESH_INTERVAL_SECONDS,
-            first=DRIVE_REFRESH_INITIAL_DELAY_SECONDS,
+            first=DRIVE_REFRESH_INTERVAL_SECONDS,
             name="drive-cache-refresh",
         )
 

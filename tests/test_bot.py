@@ -10,7 +10,6 @@ from telegram import Chat, Message, MessageEntity, Update, User
 from telegram.ext import CommandHandler, ExtBot
 
 from eu_grades_bot.bot import (
-    DRIVE_REFRESH_INITIAL_DELAY_SECONDS,
     DRIVE_REFRESH_INTERVAL_SECONDS,
     build_application,
     format_cache_status,
@@ -38,7 +37,7 @@ class BotSchedulingTest(unittest.IsolatedAsyncioTestCase):
         job_queue.run_repeating.assert_called_once_with(
             refresh_drive_cache_job,
             interval=DRIVE_REFRESH_INTERVAL_SECONDS,
-            first=DRIVE_REFRESH_INITIAL_DELAY_SECONDS,
+            first=DRIVE_REFRESH_INTERVAL_SECONDS,
             name="drive-cache-refresh",
         )
         self.assertEqual(DRIVE_REFRESH_INTERVAL_SECONDS, 15 * 60)
