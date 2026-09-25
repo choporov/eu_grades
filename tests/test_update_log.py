@@ -57,6 +57,7 @@ class UpdateLogTest(unittest.TestCase):
     def make_provider(self, update_log=None):
         service = Mock()
         resource = service.files.return_value
+        resource.get.return_value.execute.return_value = {"name": "Журнали"}
         resource.list.return_value.execute.side_effect = lambda: {"files": self.files}
         resource.get_media.side_effect = lambda fileId: fileId
         resource.export_media.side_effect = lambda fileId, mimeType: fileId

@@ -3,6 +3,7 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import Mock
 
 from openpyxl import Workbook
 
@@ -120,6 +121,9 @@ class DriveWorkbookProviderTest(unittest.TestCase):
         workbook.save(workbook_bytes)
 
         class FakeFilesResource:
+            def get(self, **kwargs):
+                return Mock(execute=Mock(return_value={"name": "Журнали"}))
+
             def list(self, **kwargs):
                 return self
 

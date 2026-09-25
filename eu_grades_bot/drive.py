@@ -6,12 +6,14 @@ from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
+from typing import Iterable
 
 from .update_log import UpdateLog
 
 
 GOOGLE_SHEETS_MIME = "application/vnd.google-apps.spreadsheet"
 GOOGLE_SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
+GOOGLE_FOLDER_MIME = "application/vnd.google-apps.folder"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 SUPPORTED_DRIVE_WORKBOOK_MIMES = {GOOGLE_SHEETS_MIME, XLSX_MIME}
 logger = logging.getLogger(__name__)
@@ -40,12 +42,13 @@ class LocalWorkbookProvider:
     def list_workbooks(self) -> list[WorkbookSource]:
         if not self.folder.exists():
             raise FileNotFoundError(f"Grades folder does not exist: {self.folder}")
+        if self.folder.name.startswith("_") or self.folder.resolve().name.startswith("_"):
+            return []
+
+        files = list(self._iter_files())
         workbook_files = sorted(
-            [
-                *self.folder.glob("*.xlsx"),
-                *self.folder.glob("*.xlsm"),
-            ],
-            key=lambda p: p.name.lower(),
+            (path for path in files if path.suffix.lower() in {".xlsx", ".xlsm"}),
+            key=lambda p: (p.name.lower(), str(p)),
         )
         workbooks = [
             WorkbookSource(title=path.stem, path=path)
@@ -53,11 +56,34 @@ class LocalWorkbookProvider:
             if not path.name.startswith("~$")
         ]
 
-        gsheet_files = sorted(self.folder.glob("*.gsheet"), key=lambda p: p.name.lower())
+        gsheet_files = sorted(
+            (path for path in files if path.suffix.lower() == ".gsheet"),
+            key=lambda p: (p.name.lower(), str(p)),
+        )
         if gsheet_files:
             workbooks.extend(self._export_gsheet_files(gsheet_files))
 
         return workbooks
+
+    def _iter_files(self) -> Iterable[Path]:
+        # Exports are derived copies, not new sources on the next refresh.
+        cache_dirs = {(self.folder / ".gsheet_cache").resolve()}
+        if self.cache_dir is not None:
+            cache_dirs.add(self.cache_dir.resolve())
+        pending = [self.folder]
+        while pending:
+            folder = pending.pop()
+            # Let listing errors abort the refresh instead of publishing a partial cache.
+            for path in folder.iterdir():
+                if path.is_dir():
+                    if (
+                        not path.name.startswith("_")
+                        and not path.is_symlink()
+                        and path.resolve() not in cache_dirs
+                    ):
+                        pending.append(path)
+                elif path.is_file():
+                    yield path
 
     def _export_gsheet_files(self, paths: list[Path]) -> list[WorkbookSource]:
         if not self.credentials_file:
@@ -163,32 +189,51 @@ class DriveWorkbookProvider:
         return build_drive_service(self.credentials_file)
 
     def _list_drive_files(self, service) -> list[dict]:
-        query = f"'{self.folder_id}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'"
+        root = service.files().get(
+            fileId=self.folder_id, fields="name", supportsAllDrives=True,
+        ).execute()
+        if root["name"].startswith("_"):
+            return []
+
         result: list[dict] = []
-        page_token = None
-        while True:
-            response = (
-                service.files()
-                .list(
-                    q=query,
-                    corpora="allDrives",
-                    spaces="drive",
-                    fields=(
-                        "nextPageToken, "
-                        "files(id, name, mimeType, modifiedTime, "
-                        "shortcutDetails(targetId,targetMimeType))"
-                    ),
-                    pageToken=page_token,
-                    pageSize=1000,
-                    supportsAllDrives=True,
-                    includeItemsFromAllDrives=True,
+        pending = [self.folder_id]
+        visited: set[str] = set()
+        while pending:
+            folder_id = pending.pop()
+            if folder_id in visited:
+                continue
+            visited.add(folder_id)
+            query = f"'{folder_id}' in parents and trashed = false"
+            page_token = None
+            while True:
+                response = (
+                    service.files()
+                    .list(
+                        q=query,
+                        corpora="allDrives",
+                        spaces="drive",
+                        fields=(
+                            "nextPageToken, "
+                            "files(id, name, mimeType, modifiedTime, "
+                            "shortcutDetails(targetId,targetMimeType))"
+                        ),
+                        pageToken=page_token,
+                        pageSize=1000,
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                    )
+                    .execute()
                 )
-                .execute()
-            )
-            result.extend(response.get("files", []))
-            page_token = response.get("nextPageToken")
-            if not page_token:
-                return result
+                for file_info in response.get("files", []):
+                    if file_info.get("mimeType") == GOOGLE_FOLDER_MIME:
+                        if not file_info["name"].startswith("_"):
+                            pending.append(file_info["id"])
+                    else:
+                        result.append(file_info)
+                page_token = response.get("nextPageToken")
+                if not page_token:
+                    break
+        return result
 
     @staticmethod
     def _resolve_workbook_file(file_info: dict) -> dict | None:
